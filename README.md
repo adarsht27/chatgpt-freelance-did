@@ -4,7 +4,7 @@
 
 
 
-\*\*\[View the full rendered report →](https://adarshtripathi.github.io/chatgpt-freelance-did/)\*\*
+\*\*\[View the full rendered report →](https://adarsht27.github.io/chatgpt-freelance-did/)\*\*
 
 
 
