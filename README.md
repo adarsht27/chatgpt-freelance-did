@@ -48,4 +48,12 @@ The DiD estimate (β_interaction) suggests a statistically significant earnings 
 
 ---
 
-## T
+## Tools
+
+R · tidyverse · estimatr · ggplot2 · patchwork · kableExtra
+
+---
+
+## Reference
+
+Felten, E., Raj, M., & Seamans, R. (2023). *Occupational Heterogeneity in Exposure to Generative AI.* SSRN Working Paper.
