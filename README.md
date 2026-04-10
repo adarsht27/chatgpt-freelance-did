@@ -1,7 +1,7 @@
 # Did ChatGPT Hurt Freelance Writers?
 ### A Difference-in-Differences Analysis | Adarsh Tripathi
 
-**[View the full rendered report →](https://adarsht27.github.io/chatgpt-freelance-did/)**
+**[View the full rendered report →](https://adarsht27.github.io/chatgpt-freelance-did/chatgpt_freelance_did.html)**
 
 ---
 
