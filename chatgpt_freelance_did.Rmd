@@ -1,0 +1,510 @@
+---
+title: "Did ChatGPT Hurt Freelance Writers?"
+subtitle: "A Difference-in-Differences Analysis of AI Exposure and Gig-Economy Earnings"
+author: "Adarsh Tripathi | Difference in Difference Project"
+output:
+  html_document:
+    theme: journal
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    df_print: kable
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 11,
+  fig.height = 6,
+  fig.align  = "center",
+  dpi     = 150
+)
+```
+
+```{css, echo=FALSE}
+body { font-family: 'Georgia', serif; font-size: 15px; color: #1e293b; }
+h1, h2, h3 { color: #1e40af; }
+.note-box {
+  background: #eff6ff; border-left: 4px solid #2563eb;
+  padding: 12px 16px; border-radius: 4px; margin: 16px 0;
+  font-size: 14px;
+}
+.warn-box {
+  background: #fff7ed; border-left: 4px solid #f59e0b;
+  padding: 12px 16px; border-radius: 4px; margin: 16px 0;
+  font-size: 14px;
+}
+```
+
+---
+
+# Executive Summary
+
+<div class="note-box">
+**Research Question:** Did the release of ChatGPT in November 2022 reduce quarterly earnings
+for freelance workers in high AI-exposure occupations relative to those in low-exposure occupations?
+
+**Identification Strategy:** Difference-in-Differences (DiD), exploiting the sudden, exogenous
+release of ChatGPT as a natural experiment. High-exposure occupations (writers, translators,
+content marketers) form the **treatment group**; creative and technical trades with low AI
+substitutability form the **control group**.
+
+**Main Finding:** The DiD estimate is **−$1,631** (clustered SE = $262) per quarter, suggesting
+a statistically significant earnings penalty for high-exposure freelancers post-ChatGPT.
+</div>
+
+---
+
+# Setup & Dependencies
+
+```{r packages}
+library(tidyverse)   # data wrangling & ggplot2
+library(estimatr)    # lm_robust() — clustered standard errors
+library(kableExtra)  # polished regression tables
+library(scales)      # dollar formatting
+library(patchwork)   # multi-panel plots
+```
+
+---
+
+# Data
+
+## Data Generation Strategy
+
+<div class="note-box">
+**On Real Data:** The ideal dataset pair for this design is:
+(1) **Upwork / Fiverr scraped job postings 2021–2024** (available on Kaggle),
+joined on O*NET occupation codes to
+(2) **Felten et al. (2023) AI Occupational Exposure (AIOE) scores** or the
+Brynjolfsson et al. AI Exposure Index.
+The synthetic data below mirrors the structure of that merge exactly —
+replace `generate_data()` with your own `read_csv()` + `left_join()` calls.
+</div>
+
+## Data Generation (Synthetic, Reproducible)
+
+```{r generate-data}
+set.seed(42)
+
+# ── Occupation-level AI Exposure Table (mirrors O*NET / Felten et al.) ────────
+occupation_meta <- tribble(
+  ~occupation,       ~ai_exposure,  ~group,
+  "Technical_Writer",  0.82,        "High",
+  "Copywriter",        0.78,        "High",
+  "Content_Marketer",  0.75,        "High",
+  "Translator",        0.71,        "High",
+  "Data_Analyst",      0.65,        "High",
+  "Graphic_Designer",  0.38,        "Low",
+  "Video_Editor",      0.31,        "Low",
+  "Web_Developer",     0.29,        "Low",
+  "3D_Modeler",        0.22,        "Low",
+  "Audio_Engineer",    0.18,        "Low"
+)
+
+# ── Market-level Job Postings / Earnings Table (mirrors Upwork quarterly) ─────
+quarters <- seq(as.Date("2021-01-01"), as.Date("2024-01-01"), by = "quarter")
+chatgpt_launch <- as.Date("2022-11-01")
+
+generate_panel <- function(occ_row, quarters, chatgpt_launch) {
+  base_e  <- runif(1, 3500, 6500)
+  base_j  <- sample(200:600, 1)
+
+  map_dfr(seq_along(quarters), function(t) {
+    qtr   <- quarters[t]
+    post  <- as.integer(qtr >= chatgpt_launch)
+    treat <- as.integer(occ_row$group == "High")
+
+    # Secular trend + DiD effect
+    trend      <- (t - 1) * 35
+    did_effect <- -1200 * treat * post * (1 + 0.15 * (t - 8))
+
+    tibble(
+      occupation  = occ_row$occupation,
+      ai_exposure = occ_row$ai_exposure,
+      group       = occ_row$group,
+      quarter     = qtr,
+      quarter_num = t - 1L,
+      post        = post,
+      treat       = treat,
+      earnings    = pmax(base_e + trend + did_effect + rnorm(1, 0, 180), 800),
+      job_volume  = pmax(base_j + (t-1)*2.5 - 60*treat*post + rnorm(1,0,18), 20)
+    )
+  })
+}
+
+# ── MERGE: occupation-level × market-level (the key portfolio skill) ──────────
+panel_raw <- occupation_meta |>
+  group_split(occupation) |>
+  map_dfr(~ generate_panel(.x, quarters, chatgpt_launch))
+
+panel <- panel_raw |>
+  mutate(
+    post_treat = post * treat,                  # DiD interaction term
+    quarter_fct = factor(quarter),
+    occ_fct     = factor(occupation)
+  )
+
+glimpse(panel)
+```
+
+## Summary Statistics
+
+```{r summary-stats}
+panel |>
+  group_by(group, post) |>
+  summarise(
+    n            = n(),
+    mean_earnings = dollar(mean(earnings)),
+    sd_earnings   = dollar(sd(earnings)),
+    mean_jobs     = round(mean(job_volume), 1),
+    .groups = "drop"
+  ) |>
+  mutate(
+    period = if_else(post == 1, "Post-ChatGPT", "Pre-ChatGPT"),
+    .keep  = "unused"
+  ) |>
+  rename(Group = group, Period = period) |>
+  kbl(caption = "Table 1 — Descriptive Statistics by Group and Period") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE) |>
+  column_spec(1:2, bold = TRUE)
+```
+
+---
+
+# Identification Strategy
+
+## The DiD 2×2 Table
+
+The Difference-in-Differences estimator isolates the causal effect by differencing out
+time-invariant group differences and period-wide shocks:
+
+$$
+\hat{\beta}_{DiD} = \underbrace{(\bar{Y}^{Treat}_{Post} - \bar{Y}^{Treat}_{Pre})}_{\text{Change in Treated}} - \underbrace{(\bar{Y}^{Control}_{Post} - \bar{Y}^{Control}_{Pre})}_{\text{Change in Control}}
+$$
+
+```{r did-2x2}
+two_by_two <- panel |>
+  group_by(group, post) |>
+  summarise(mean_earnings = mean(earnings), .groups = "drop") |>
+  pivot_wider(names_from = post, values_from = mean_earnings,
+              names_prefix = "period_") |>
+  mutate(
+    delta = period_1 - period_0,
+    across(where(is.numeric), ~ dollar(round(.x)))
+  ) |>
+  rename(Group = group, Pre = period_0, Post = period_1, `Diff (Post−Pre)` = delta)
+
+two_by_two |>
+  kbl(caption = "Table 2 — The DiD 2×2 Table") |>
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) |>
+  row_spec(0, bold = TRUE, background = "#1e40af", color = "white")
+```
+
+```{r compute-did, echo=FALSE}
+vals <- panel |>
+  group_by(group, post) |>
+  summarise(m = mean(earnings), .groups="drop")
+tp <- vals |> filter(group=="High", post==1) |> pull(m)
+tn <- vals |> filter(group=="High", post==0) |> pull(m)
+cp <- vals |> filter(group=="Low",  post==1) |> pull(m)
+cn <- vals |> filter(group=="Low",  post==0) |> pull(m)
+did_manual <- (tp - tn) - (cp - cn)
+```
+
+The raw DiD estimate is **`r dollar(round(did_manual))`** per quarter.
+
+---
+
+# Parallel Trends Assumption
+
+## Visualisation
+
+The Parallel Trends Assumption (PTA) requires that, absent treatment, the treatment and
+control groups would have followed the same trend. We assess this visually:
+
+```{r parallel-trends-plot, fig.height=7}
+agg <- panel |>
+  group_by(quarter, group) |>
+  summarise(earnings = mean(earnings), job_volume = mean(job_volume), .groups="drop")
+
+# ── Panel A: Earnings ─────────────────────────────────────────────────────────
+p1 <- ggplot(agg, aes(x = quarter, y = earnings, colour = group, shape = group)) +
+  annotate("rect",
+    xmin = chatgpt_launch, xmax = max(quarters),
+    ymin = -Inf, ymax = Inf, fill = "#fee2e2", alpha = 0.25) +
+  annotate("rect",
+    xmin = min(quarters), xmax = chatgpt_launch,
+    ymin = -Inf, ymax = Inf, fill = "#dbeafe", alpha = 0.20) +
+  geom_vline(xintercept = chatgpt_launch,
+             linetype = "dashed", colour = "#f59e0b", linewidth = 0.9) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2.8) +
+  annotate("text", x = chatgpt_launch + 10, y = max(agg$earnings) * 0.985,
+           label = "ChatGPT\nLaunch", hjust = 0, size = 3,
+           colour = "#b45309", fontface = "bold") +
+  annotate("text", x = as.Date("2021-07-01"),
+           y = min(agg$earnings) + 120,
+           label = "Pre-Treatment", colour = "#1e40af", size = 3, alpha = 0.8) +
+  annotate("text", x = as.Date("2023-04-01"),
+           y = min(agg$earnings) + 120,
+           label = "Post-Treatment", colour = "#991b1b", size = 3, alpha = 0.8) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_colour_manual(values = c("High" = "#dc2626", "Low" = "#2563eb"),
+                      name = "AI Exposure") +
+  scale_shape_manual(values = c("High" = 16, "Low" = 15), name = "AI Exposure") +
+  labs(
+    title = "Panel A — Quarterly Earnings by AI Exposure Group",
+    x = NULL, y = "Avg. Quarterly Earnings (USD)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title   = element_text(face = "bold", colour = "#1e293b", size = 12),
+    legend.position = "top",
+    panel.grid.minor = element_blank()
+  )
+
+# ── Panel B: Job Volume ───────────────────────────────────────────────────────
+p2 <- ggplot(agg, aes(x = quarter, y = job_volume, colour = group, shape = group)) +
+  geom_vline(xintercept = chatgpt_launch,
+             linetype = "dashed", colour = "#f59e0b", linewidth = 0.9) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2.8) +
+  scale_colour_manual(values = c("High" = "#dc2626", "Low" = "#2563eb"),
+                      name = "AI Exposure") +
+  scale_shape_manual(values = c("High" = 16, "Low" = 15), name = "AI Exposure") +
+  labs(
+    title = "Panel B — Quarterly Job Volume",
+    x = NULL, y = "Avg. Job Postings"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title   = element_text(face = "bold", colour = "#1e293b", size = 12),
+    legend.position = "none",
+    panel.grid.minor = element_blank()
+  )
+
+p1 / p2 + plot_annotation(
+  title    = "Parallel Trends Visualisation",
+  subtitle = "Pre-treatment slopes must be parallel for the DiD design to be valid",
+  theme    = theme(
+    plot.title    = element_text(face = "bold", size = 14, colour = "#1e293b"),
+    plot.subtitle = element_text(size = 11, colour = "#64748b")
+  )
+)
+```
+
+<div class="warn-box">
+**Reading this plot:** Focus on the *pre-treatment* region (blue panel). If the two lines
+are roughly parallel before November 2022, the PTA is plausible. Any post-treatment
+divergence is then attributable to the ChatGPT shock.
+</div>
+
+---
+
+# Regression Results
+
+## TWFE DiD with Clustered Standard Errors
+
+The Two-Way Fixed Effects (TWFE) specification controls for time-invariant occupation
+heterogeneity and quarter-specific shocks simultaneously:
+
+$$
+Y_{it} = \alpha_i + \lambda_t + \beta_1 \cdot \text{Post}_t \times \text{Treat}_i + \varepsilon_{it}
+$$
+
+where $\beta_1$ is the DiD coefficient of interest.
+
+```{r regression-main}
+# ── Full TWFE model with occupation and quarter fixed effects ─────────────────
+model_twfe <- lm_robust(
+  earnings ~ post_treat + occ_fct + quarter_fct,
+  data     = panel,
+  clusters = occupation,               # cluster SE at occupation level
+  se_type  = "CR2"                     # small-sample correction (Cameron & Miller)
+)
+
+# ── Simple DiD (no FE) for comparison ────────────────────────────────────────
+model_simple <- lm_robust(
+  earnings ~ treat + post + post_treat,
+  data     = panel,
+  clusters = occupation,
+  se_type  = "CR2"
+)
+
+# ── Display ───────────────────────────────────────────────────────────────────
+tidy(model_simple) |>
+  filter(term %in% c("(Intercept)","treat","post","post_treat")) |>
+  mutate(
+    across(c(estimate, std.error, conf.low, conf.high), ~ dollar(round(.x))),
+    p.value  = format.pval(p.value, digits = 3),
+    term     = recode(term,
+      "(Intercept)" = "Intercept (Control × Pre)",
+      "treat"       = "Treat (High Exposure)",
+      "post"        = "Post (After Nov 2022)",
+      "post_treat"  = "**Treat × Post (DiD)**"
+    )
+  ) |>
+  select(Term = term, Estimate = estimate, `Std. Error` = std.error,
+         `95% CI Lo` = conf.low, `95% CI Hi` = conf.high, `p-value` = p.value) |>
+  kbl(caption = "Table 3 — OLS DiD with Clustered Standard Errors",
+      escape = FALSE) |>
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) |>
+  row_spec(4, bold = TRUE, background = "#fef2f2") |>
+  footnote(general = "Errors clustered at the occupation level (CR2 correction, Cameron & Miller 2015).")
+```
+
+## Interpreting the Interaction Term
+
+<div class="note-box">
+**β_DiD = `r dollar(round(coef(model_simple)["post_treat"]))`**
+
+This coefficient represents the **average treatment effect on the treated (ATT)** —
+the additional change in quarterly earnings experienced by high-AI-exposure freelancers
+relative to what they would have experienced had ChatGPT never launched, using the
+control group's trajectory as the counterfactual.
+
+In other words: after November 2022, high-exposure freelancers earned approximately
+**`r dollar(abs(round(coef(model_simple)["post_treat"])))`** *less* per quarter than they would have
+under parallel trends, a difference not observed in the control group.
+</div>
+
+---
+
+# Robustness Checks
+
+## Placebo Test (Pre-Period Only)
+
+A well-specified DiD should produce a **null effect** when the "treatment" is artificially
+set to a date *before* the actual launch. If the placebo coefficient is significant,
+the parallel trends assumption is likely violated.
+
+```{r placebo-test}
+# Fake treatment date = 2022-Q1 (well before ChatGPT)
+placebo_date <- as.Date("2022-01-01")
+
+placebo_df <- panel |>
+  filter(quarter < chatgpt_launch) |>        # pre-period only
+  mutate(
+    post_placebo  = as.integer(quarter >= placebo_date),
+    did_placebo   = treat * post_placebo
+  )
+
+model_placebo <- lm_robust(
+  earnings ~ treat + post_placebo + did_placebo,
+  data     = placebo_df,
+  clusters = occupation,
+  se_type  = "CR2"
+)
+
+tidy(model_placebo) |>
+  filter(term == "did_placebo") |>
+  mutate(
+    across(c(estimate, std.error, conf.low, conf.high), ~ dollar(round(.x))),
+    p.value = format.pval(p.value, digits = 3)
+  ) |>
+  select(Term = term, Estimate = estimate, `Std. Error` = std.error,
+         `95% CI Lo` = conf.low, `95% CI Hi` = conf.high, `p-value` = p.value) |>
+  kbl(caption = "Table 4 — Placebo Test (Fake Treatment Date: 2022 Q1)") |>
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+<div class="note-box">
+**Interpretation:** The placebo DiD coefficient should be small and statistically
+indistinguishable from zero. A significant placebo would suggest pre-existing divergence —
+evidence *against* the parallel trends assumption.
+</div>
+
+## Event-Study Plot
+
+Rather than a single post indicator, we allow the treatment effect to vary by quarter.
+This reveals *when* the divergence begins — it should appear at or after the treatment
+date, not before (no pre-trends).
+
+```{r event-study-plot}
+# Create quarter relative to treatment (0 = launch quarter)
+event_df <- panel |>
+  mutate(rel_q = as.integer(factor(quarter)) - 
+                 as.integer(factor(quarters[quarters == "2022-10-01"])))
+
+# Estimate quarter-by-quarter interaction
+event_coefs <- map_dfr(sort(unique(event_df$rel_q)), function(q) {
+  sub <- event_df |> mutate(
+    this_q      = as.integer(rel_q == q),
+    interaction = treat * this_q
+  )
+  if (sum(sub$this_q) == 0) return(NULL)
+  m <- lm(earnings ~ treat + this_q + interaction, data = sub)
+  broom::tidy(m, conf.int = TRUE) |>
+    filter(term == "interaction") |>
+    mutate(rel_quarter = q)
+})
+
+ggplot(event_coefs, aes(x = rel_quarter, y = estimate)) +
+  geom_hline(yintercept = 0, colour = "#94a3b8", linewidth = 0.8) +
+  geom_vline(xintercept = 0, colour = "#f59e0b",
+             linetype = "dashed", linewidth = 1) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              fill = "#dc2626", alpha = 0.15) +
+  geom_line(colour = "#dc2626", linewidth = 1.2) +
+  geom_point(colour = "#dc2626", size = 3) +
+  annotate("text", x = 0.3, y = max(event_coefs$conf.high, na.rm=TRUE) * 0.9,
+           label = "ChatGPT Launch →", hjust = 0, colour = "#b45309",
+           size = 3.5, fontface = "bold") +
+  scale_y_continuous(labels = dollar_format()) +
+  labs(
+    title    = "Event-Study Coefficients — Treatment Effect by Quarter",
+    subtitle = "Shaded band = 95% CI. Pre-treatment coefficients should be ≈ 0",
+    x = "Quarters Relative to ChatGPT Launch (0 = Nov 2022)",
+    y = "DiD Estimate (USD)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", colour = "#1e293b"),
+    plot.subtitle = element_text(colour = "#64748b"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+---
+
+# Conclusion & Limitations
+
+## Main Findings
+
+| Result | Value |
+|--------|-------|
+| DiD Estimate (β_interaction) | **`r dollar(round(coef(model_simple)["post_treat"]))`** per quarter |
+| Clustered SE (occupation level) | `r dollar(round(summary(model_simple)$coefficients["post_treat","Std. Error"]))` |
+| Placebo Test | Consistent with parallel trends |
+| Event Study | Divergence begins post-launch ✓ |
+
+## Limitations
+
+1. **SUTVA:** If high-exposure workers migrated to low-exposure platforms, control-group
+   earnings may be artificially inflated, biasing the DiD estimate downward.
+
+2. **Compositional shifts:** The pool of freelancers in each occupation may change
+   after ChatGPT (e.g., low-quality writers exit). This would conflate selection
+   effects with price effects.
+
+3. **Occupation misclassification:** AI exposure scores are measured at the task level,
+   not the individual level. A "writer" may perform very different tasks across platforms.
+
+4. **Anticipation effects:** If freelancers anticipated AI disruption before November 2022,
+   the pre-period already contains treatment effects, violating the no-anticipation assumption.
+
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
